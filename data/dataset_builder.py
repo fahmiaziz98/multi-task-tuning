@@ -63,7 +63,7 @@ def build_qa_pair_examples(squad_split, seed: int) -> list[TrainingTask]:
         question = row["question"]
 
         answer_for_input = MASK_TOKEN if rng.random() < MASKING_CHANCE else answer
-        input_text = f"generate qa pair: context: {context} answer: {answer_for_input}"
+        input_text = f"generate question and answer: context: {context} answer: {answer_for_input}"
         target = f"{answer} {SEP_TOKEN} {question}"
 
         examples.append(TrainingTask(TaskType.QA_PAIR, input_text, target))
@@ -122,8 +122,8 @@ def build_distractor_examples(race_split) -> list[TrainingTask]:
         # Note: a space was previously missing between context and
         # "question:" here, causing the two to run together as one token.
         input_text = (
-            f"generate distractors: context: {context} "
-            f"question: {row['question']} answer: {correct_answer}"
+            f"generate distractors: {row['question']} "
+            f"answer: {correct_answer} context: {context}"
         )
         target = DISTRACTOR_SEP.join(distractors)
 
