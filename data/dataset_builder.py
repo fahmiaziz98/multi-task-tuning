@@ -85,7 +85,7 @@ def build_distractor_generation(race_split) -> list[TrainingTask]:
     examples = []
     for row in race_split:
         options = row["options"]
-        answer_letter = row["answers"]
+        answer_letter = row["answer"]
 
         if len(options) != 4 or answer_letter not in "ABCD":
             continue
