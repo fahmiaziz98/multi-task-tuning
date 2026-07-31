@@ -1,15 +1,7 @@
-"""Central configuration for training the multi-task T5 model.
-
-Keeping hyperparameters and shared constants (like the W&B project name) in
-one place avoids duplication and drift across build_dataset.py, train.py,
-and evaluate.py.
-"""
-
 import uuid
 from dataclasses import dataclass, field
 
-# Single source of truth for the W&B project name. Previously this was
-# duplicated (and inconsistently spelled) across three files.
+
 WANDB_PROJECT = "multitask-t5-quiz-generator"
 
 
@@ -33,7 +25,7 @@ class TrainingConfig:
         seed: Random seed for reproducibility.
         run_name: Unique identifier for this run, used as the W&B run id.
         dataset_artifact: W&B artifact reference for the training dataset,
-            e.g. "qg-qa-distractor-dataset:latest".
+            e.g. "qa-pair-distractor-dataset:latest".
         push_to_hub: Whether to push the final model to the HF Hub.
         hf_repo_id: Target HF Hub repo id, used only if push_to_hub is True.
     """
@@ -56,7 +48,7 @@ class TrainingConfig:
     seed: int = 42
 
     run_name: str = field(default_factory=lambda: f"run-{uuid.uuid4().hex[:8]}")
-    dataset_artifact: str = "qg-qa-distractor-dataset:latest"
+    dataset_artifact: str = "qa-pair-distractor-dataset:latest"
 
     push_to_hub: bool = True
     hf_repo_id: str = "fahmiaziz/multitask-t5-quiz-generator"

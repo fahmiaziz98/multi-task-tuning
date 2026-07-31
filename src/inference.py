@@ -1,19 +1,3 @@
-"""End-to-end inference pipeline: context -> qa_pair -> distractors.
-
-Wraps the fine-tuned multi-task model in a single class. Two ways to build
-a question:
-    - generate_qa_pair(context): fully automatic — model picks its own
-      salient answer AND generates the matching question, in one call.
-    - generate_qa_pair(context, answer=...): answer-aware — question is
-      generated to specifically target the given answer.
-
-Usage:
-    from inference import QuizGenerator
-
-    generator = QuizGenerator("your-username/multitask-t5-quiz-generator")
-    quiz = generator.generate_quiz(context="...")
-"""
-
 from dataclasses import dataclass
 
 import torch
@@ -93,32 +77,19 @@ class QuizGenerator:
             model's own chosen answer, not necessarily the input `answer`.
         """
         answer_for_input = answer if answer is not None else MASK_TOKEN
-        input_text = f"generate qa pair: context: {context} answer: {answer_for_input}"
+        # Short field (answer/mask) first, long context last — matches the
+        # training-time prompt ordering so truncation behaves the same way.
+        input_text = f"generate quiz: answer: {answer_for_input} context: {context}"
         raw_output = self._generate(input_text)
 
         if SEP_TOKEN not in raw_output:
-            # Malformed generation without a separator; treat the whole
-            # output as the question and fall back to the given answer.
             return (answer or ""), raw_output.strip()
 
         generated_answer, _, generated_question = raw_output.partition(SEP_TOKEN)
         return generated_answer.strip(), generated_question.strip()
 
-    def generate_answer(self, context: str, question: str) -> str:
-        """Generate an answer given a context and a user-supplied question.
-
-        Args:
-            context: Source passage.
-            question: Question to answer.
-
-        Returns:
-            Generated answer string.
-        """
-        input_text = f"answer the question: question: {question} context: {context}"
-        return self._generate(input_text)
-
     def generate_distractors(self, context: str, question: str, answer: str) -> list[str]:
-        """Generate distractor options given a context, question, and answer.
+        """Generate distractor options given a question, answer, and context.
 
         Args:
             context: Source passage.
@@ -128,9 +99,8 @@ class QuizGenerator:
         Returns:
             List of distractor strings (empty entries filtered out).
         """
-        input_text = (
-            f"generate distractors: context: {context} question: {question} answer: {answer}"
-        )
+        # Short fields (question/answer) first, long context last.
+        input_text = f"generate distractor: question: {question} answer: {answer} context: {context}"
         raw_output = self._generate(input_text)
         return [d.strip() for d in raw_output.split(DISTRACTOR_SEP.strip()) if d.strip()]
 

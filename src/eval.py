@@ -1,20 +1,3 @@
-"""Evaluate a fine-tuned multi-task T5 model separately for each task, and
-attach the results to the corresponding W&B training run.
-
-Metrics per task:
-    - qa_pair: parsed into "answer <sep> question", then scored as EM/F1 on
-      the answer half and BLEU-4/ROUGE-L on the question half. Reported
-      once overall, and once broken down by mode (masked vs answer-aware),
-      since those are two different skills the model is learning at once.
-    - qa: Exact Match (EM) and F1 (token overlap).
-    - distractor: distinct-1/2 (diversity) plus a validity check that
-      distractors are not identical to the gold answer.
-
-Usage:
-    python src/evaluate.py --checkpoint ./checkpoints/multitask-t5 \
-        --test_file ./data/processed/test.jsonl --run_id run-xxxx
-"""
-
 import argparse
 import json
 import re
@@ -233,31 +216,6 @@ def evaluate_qa_pair(model, tokenizer, examples: list[dict], device: str) -> dic
     return result
 
 
-def evaluate_qa(model, tokenizer, examples: list[dict], device: str) -> dict:
-    """Evaluate the QA task using EM and F1.
-
-    Args:
-        model: Fine-tuned model.
-        tokenizer: Matching tokenizer.
-        examples: List of QA example dicts.
-        device: Torch device string.
-
-    Returns:
-        Dict with "em" and "f1" scores, averaged over all examples.
-    """
-    inputs = [ex["input_text"] for ex in examples]
-    references = [ex["target"] for ex in examples]
-    predictions = generate_predictions(model, tokenizer, inputs, device)
-
-    em_scores, f1_scores = [], []
-    for pred, ref in zip(predictions, references):
-        em, f1 = compute_em_f1(pred, ref)
-        em_scores.append(em)
-        f1_scores.append(f1)
-
-    return {"em": sum(em_scores) / len(em_scores), "f1": sum(f1_scores) / len(f1_scores)}
-
-
 def evaluate_distractor(model, tokenizer, examples: list[dict], device: str) -> dict:
     """Evaluate the Distractor task using distinct-n and validity rate.
 
@@ -279,7 +237,9 @@ def evaluate_distractor(model, tokenizer, examples: list[dict], device: str) -> 
     total_count = 0
 
     for pred, ex in zip(predictions, examples):
-        gold_answer = ex["input_text"].split("answer: ")[-1].strip().lower()
+        # Gold answer now sits between "answer: " and " context:" since the
+        # field order was changed to put context last.
+        gold_answer = ex["input_text"].split("answer: ")[-1].split(" context:")[0].strip().lower()
         distractors = [d.strip() for d in pred.split(DISTRACTOR_SEP.strip()) if d.strip()]
 
         for d in distractors:
@@ -298,7 +258,7 @@ def evaluate_distractor(model, tokenizer, examples: list[dict], device: str) -> 
 
 
 def evaluate_all(checkpoint: str, test_file: str) -> dict:
-    """Run evaluation for all three tasks and return a combined report.
+    """Run evaluation for all tasks and return a combined report.
 
     Args:
         checkpoint: Path to the fine-tuned model checkpoint.
@@ -319,8 +279,6 @@ def evaluate_all(checkpoint: str, test_file: str) -> dict:
         report["qa_pair"] = evaluate_qa_pair(
             model, tokenizer, grouped_examples[TaskType.QA_PAIR.value], device
         )
-    if TaskType.QA.value in grouped_examples:
-        report["qa"] = evaluate_qa(model, tokenizer, grouped_examples[TaskType.QA.value], device)
     if TaskType.DISTRACTOR.value in grouped_examples:
         report["distractor"] = evaluate_distractor(
             model, tokenizer, grouped_examples[TaskType.DISTRACTOR.value], device
@@ -338,10 +296,6 @@ if __name__ == "__main__":
     results = evaluate_all(args.checkpoint, args.test_file)
     print(json.dumps(results, indent=2))
 
-    # A dedicated evaluation run, linked by naming convention to the
-    # training run it evaluates. Kept separate from resuming the training
-    # run directly to avoid W&B's resume="must" occasionally failing on
-    # Colab when a run was closed non-gracefully (disconnects, OOM, etc.).
     run = wandb.init(project=WANDB_PROJECT, job_type="evaluation", name=f"eval-{args.run_id}")
     for task, metrics in results.items():
         wandb.log({f"{task}/{k}": v for k, v in metrics.items()})

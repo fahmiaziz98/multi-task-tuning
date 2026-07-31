@@ -1,16 +1,8 @@
-"""Data schema definitions for the multi-task QA-pair/QA/Distractor dataset.
-
-Defines the canonical example format shared across all three tasks so that
-dataset building, training, and evaluation code rely on one consistent
-structure.
-"""
-
 from dataclasses import dataclass
 from enum import Enum
 
 # Single special token used both to join multiple distractors and to
-# separate the answer from the question in qa_pair targets. Reusing one
-# token keeps the tokenizer's added-vocab minimal.
+# separate the answer from the question in qa_pair targets.
 SEP_TOKEN = "<sep>"
 DISTRACTOR_SEP = f" {SEP_TOKEN} "
 
@@ -23,16 +15,13 @@ class TaskType(str, Enum):
     """Enumerates the supported fine-tuning tasks.
 
     Attributes:
-        QA_PAIR: context (+ optional answer) -> "answer <sep> question".
+        QA_PAIR: answer (or MASK) + context -> "answer <sep> question".
             Trained with partial answer-masking so the model learns both
             answer-aware and fully-automatic question generation.
-        QA: context + question -> answer. For answering a question the
-            user supplies themselves, not one the model invented.
-        DISTRACTOR: context + question + answer -> distractor options.
+        DISTRACTOR: question + answer + context -> distractor options.
     """
 
     QA_PAIR = "qa_pair"
-    QA = "qa"
     DISTRACTOR = "distractor"
 
 
@@ -43,6 +32,9 @@ class TrainingTask:
     Attributes:
         task: Which task this example belongs to.
         input_text: The full text-to-text input, including the task prefix.
+            Short fields (question/answer/mask) are placed before the long
+            context field, since tokenizer truncation cuts from the end —
+            this keeps the critical fields safe from being truncated away.
         target: The expected output text.
     """
 
