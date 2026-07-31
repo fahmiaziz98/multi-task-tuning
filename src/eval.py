@@ -2,20 +2,25 @@
 attach the results to the corresponding W&B training run.
 
 Metrics per task:
-    - QA: Exact Match (EM) and F1 (token overlap).
-    - QG: BLEU-4 and ROUGE-L.
-    - Distractor: distinct-1/2 (diversity) plus a validity check that
+    - qa_pair: parsed into "answer <sep> question", then scored as EM/F1 on
+      the answer half and BLEU-4/ROUGE-L on the question half. Reported
+      once overall, and once broken down by mode (masked vs answer-aware),
+      since those are two different skills the model is learning at once.
+    - qa: Exact Match (EM) and F1 (token overlap).
+    - distractor: distinct-1/2 (diversity) plus a validity check that
       distractors are not identical to the gold answer.
 
 Usage:
     python src/evaluate.py --checkpoint ./checkpoints/multitask-t5 \
-        --test_file ./data/processed/test.jsonl --run_name run-xxxx
+        --test_file ./data/processed/test.jsonl --run_id run-xxxx
 """
 
 import argparse
 import json
 import re
+import sys
 from collections import defaultdict
+from pathlib import Path
 
 import evaluate as hf_evaluate
 import torch
@@ -23,9 +28,11 @@ import wandb
 from loguru import logger
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-from schema import DISTRACTOR_SEP, TaskType
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data"))
+from schema import DISTRACTOR_SEP, MASK_TOKEN, SEP_TOKEN, TaskType  # noqa: E402
 
-WANDB_PROJECT = "multitask-t5-quiz-generator"
+from config import WANDB_PROJECT
+
 BATCH_SIZE = 16
 MAX_TARGET_LENGTH = 64
 
@@ -48,8 +55,8 @@ def compute_em_f1(prediction: str, reference: str) -> tuple[float, float]:
     """Compute exact match and token-level F1 between a prediction and reference.
 
     Args:
-        prediction: Model-generated answer.
-        reference: Gold answer.
+        prediction: Model-generated text.
+        reference: Gold text.
 
     Returns:
         Tuple of (exact_match, f1), each in [0, 1].
@@ -143,6 +150,89 @@ def load_test_examples(test_file: str) -> dict[str, list[dict]]:
     return grouped
 
 
+def split_qa_pair_target(text: str) -> tuple[str, str]:
+    """Split a "answer <sep> question" string into its two parts.
+
+    Args:
+        text: Raw text expected to contain the separator token once.
+
+    Returns:
+        Tuple of (answer_part, question_part). If the separator is missing
+        (a malformed generation), the whole text is returned as the answer
+        part and the question part is an empty string.
+    """
+    if SEP_TOKEN not in text:
+        return text.strip(), ""
+    answer_part, _, question_part = text.partition(SEP_TOKEN)
+    return answer_part.strip(), question_part.strip()
+
+
+def evaluate_qa_pair(model, tokenizer, examples: list[dict], device: str) -> dict:
+    """Evaluate the qa_pair task, overall and broken down by mode.
+
+    Args:
+        model: Fine-tuned model.
+        tokenizer: Matching tokenizer.
+        examples: List of qa_pair example dicts.
+        device: Torch device string.
+
+    Returns:
+        Dict with "answer_em", "answer_f1", "question_bleu",
+        "question_rougeL" (overall), plus the same four metrics prefixed
+        with "masked_" and "answer_aware_" for each mode separately.
+    """
+    inputs = [ex["input_text"] for ex in examples]
+    is_masked = [MASK_TOKEN in ex["input_text"] for ex in examples]
+    predictions = generate_predictions(model, tokenizer, inputs, device)
+
+    pred_answers, pred_questions = [], []
+    ref_answers, ref_questions = [], []
+    for pred, ex in zip(predictions, examples):
+        pred_answer, pred_question = split_qa_pair_target(pred)
+        ref_answer, ref_question = split_qa_pair_target(ex["target"])
+        pred_answers.append(pred_answer)
+        pred_questions.append(pred_question)
+        ref_answers.append(ref_answer)
+        ref_questions.append(ref_question)
+
+    def score_subset(indices: list[int]) -> dict:
+        """Compute answer EM/F1 and question BLEU/ROUGE-L over a subset."""
+        if not indices:
+            return {}
+
+        em_scores, f1_scores = [], []
+        for i in indices:
+            em, f1 = compute_em_f1(pred_answers[i], ref_answers[i])
+            em_scores.append(em)
+            f1_scores.append(f1)
+
+        bleu_metric = hf_evaluate.load("sacrebleu")
+        rouge_metric = hf_evaluate.load("rouge")
+        subset_preds = [pred_questions[i] for i in indices]
+        subset_refs = [ref_questions[i] for i in indices]
+        bleu_result = bleu_metric.compute(predictions=subset_preds, references=[[r] for r in subset_refs])
+        rouge_result = rouge_metric.compute(predictions=subset_preds, references=subset_refs)
+
+        return {
+            "answer_em": sum(em_scores) / len(em_scores),
+            "answer_f1": sum(f1_scores) / len(f1_scores),
+            "question_bleu": bleu_result["score"],
+            "question_rougeL": rouge_result["rougeL"],
+        }
+
+    all_indices = list(range(len(examples)))
+    masked_indices = [i for i, m in enumerate(is_masked) if m]
+    answer_aware_indices = [i for i, m in enumerate(is_masked) if not m]
+
+    result = score_subset(all_indices)
+    for key, value in score_subset(masked_indices).items():
+        result[f"masked_{key}"] = value
+    for key, value in score_subset(answer_aware_indices).items():
+        result[f"answer_aware_{key}"] = value
+
+    return result
+
+
 def evaluate_qa(model, tokenizer, examples: list[dict], device: str) -> dict:
     """Evaluate the QA task using EM and F1.
 
@@ -166,31 +256,6 @@ def evaluate_qa(model, tokenizer, examples: list[dict], device: str) -> dict:
         f1_scores.append(f1)
 
     return {"em": sum(em_scores) / len(em_scores), "f1": sum(f1_scores) / len(f1_scores)}
-
-
-def evaluate_qg(model, tokenizer, examples: list[dict], device: str) -> dict:
-    """Evaluate the QG task using BLEU-4 and ROUGE-L.
-
-    Args:
-        model: Fine-tuned model.
-        tokenizer: Matching tokenizer.
-        examples: List of QG example dicts.
-        device: Torch device string.
-
-    Returns:
-        Dict with "bleu" and "rougeL" scores.
-    """
-    inputs = [ex["input_text"] for ex in examples]
-    references = [ex["target"] for ex in examples]
-    predictions = generate_predictions(model, tokenizer, inputs, device)
-
-    bleu_metric = hf_evaluate.load("sacrebleu")
-    rouge_metric = hf_evaluate.load("rouge")
-
-    bleu_result = bleu_metric.compute(predictions=predictions, references=[[r] for r in references])
-    rouge_result = rouge_metric.compute(predictions=predictions, references=references)
-
-    return {"bleu": bleu_result["score"], "rougeL": rouge_result["rougeL"]}
 
 
 def evaluate_distractor(model, tokenizer, examples: list[dict], device: str) -> dict:
@@ -250,10 +315,12 @@ def evaluate_all(checkpoint: str, test_file: str) -> dict:
     grouped_examples = load_test_examples(test_file)
 
     report = {}
+    if TaskType.QA_PAIR.value in grouped_examples:
+        report["qa_pair"] = evaluate_qa_pair(
+            model, tokenizer, grouped_examples[TaskType.QA_PAIR.value], device
+        )
     if TaskType.QA.value in grouped_examples:
-        report["answer-generation"] = evaluate_qa(model, tokenizer, grouped_examples[TaskType.QA.value], device)
-    if TaskType.QG.value in grouped_examples:
-        report["question-generation"] = evaluate_qg(model, tokenizer, grouped_examples[TaskType.QG.value], device)
+        report["qa"] = evaluate_qa(model, tokenizer, grouped_examples[TaskType.QA.value], device)
     if TaskType.DISTRACTOR.value in grouped_examples:
         report["distractor"] = evaluate_distractor(
             model, tokenizer, grouped_examples[TaskType.DISTRACTOR.value], device
@@ -265,22 +332,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate the multi-task T5 model.")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--test_file", type=str, required=True)
-    parser.add_argument(
-        "--run_name",
-        type=str,
-        required=True,
-        help="W&B run_name of the training run being evaluated (attaches eval metrics to it).",
-    )
+    parser.add_argument("--run_id", type=str, required=True, help="W&B run ID (e.g. s2d46sr0)")
     args = parser.parse_args()
 
     results = evaluate_all(args.checkpoint, args.test_file)
     print(json.dumps(results, indent=2))
 
-    # Resume the training run so eval metrics live alongside its loss curve
-    # and artifact lineage, instead of a disconnected report.
-    run = wandb.init(project=WANDB_PROJECT, id=args.run_name, resume="must")
+    # A dedicated evaluation run, linked by naming convention to the
+    # training run it evaluates. Kept separate from resuming the training
+    # run directly to avoid W&B's resume="must" occasionally failing on
+    # Colab when a run was closed non-gracefully (disconnects, OOM, etc.).
+    run = wandb.init(project=WANDB_PROJECT, job_type="evaluation", name=f"eval-{args.run_id}")
     for task, metrics in results.items():
-        for metric_name, value in metrics.items():
-            run.summary[f"eval/{task}/{metric_name}"] = value
+        wandb.log({f"{task}/{k}": v for k, v in metrics.items()})
     run.finish()
-    logger.info(f"Eval metrics attached to W&B run '{args.run_name}'")
+    logger.info(f"Eval metrics logged as W&B run 'eval-{args.run_id}'")

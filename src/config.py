@@ -1,11 +1,16 @@
 """Central configuration for training the multi-task T5 model.
 
-Keeping all hyperparameters in one dataclass avoids magic numbers scattered
-across scripts and makes experiments easy to reproduce and diff.
+Keeping hyperparameters and shared constants (like the W&B project name) in
+one place avoids duplication and drift across build_dataset.py, train.py,
+and evaluate.py.
 """
 
 import uuid
 from dataclasses import dataclass, field
+
+# Single source of truth for the W&B project name. Previously this was
+# duplicated (and inconsistently spelled) across three files.
+WANDB_PROJECT = "multitask-t5-quiz-generator"
 
 
 @dataclass

@@ -1,7 +1,11 @@
-"""End-to-end inference pipeline: context -> question -> answer -> distractors.
+"""End-to-end inference pipeline: context -> qa_pair -> distractors.
 
-Wraps the fine-tuned multi-task model in a single class so that generating a
-full multiple-choice question from raw text only takes one method call.
+Wraps the fine-tuned multi-task model in a single class. Two ways to build
+a question:
+    - generate_qa_pair(context): fully automatic — model picks its own
+      salient answer AND generates the matching question, in one call.
+    - generate_qa_pair(context, answer=...): answer-aware — question is
+      generated to specifically target the given answer.
 
 Usage:
     from inference import QuizGenerator
@@ -15,7 +19,7 @@ from dataclasses import dataclass
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-from schema import DISTRACTOR_SEP
+from schema import DISTRACTOR_SEP, MASK_TOKEN, SEP_TOKEN
 
 DEFAULT_MAX_TARGET_LENGTH = 64
 DEFAULT_NUM_BEAMS = 4
@@ -27,7 +31,7 @@ class Quiz:
 
     Attributes:
         question: The generated question.
-        answer: The generated (correct) answer.
+        answer: The (model-chosen or user-specified) correct answer.
         distractors: List of generated incorrect options.
     """
 
@@ -74,21 +78,34 @@ class QuizGenerator:
             )
         return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
-    def generate_question(self, context: str, answer: str) -> str:
-        """Generate a question given a context and a target answer.
+    def generate_qa_pair(self, context: str, answer: str | None = None) -> tuple[str, str]:
+        """Generate an (answer, question) pair from context.
 
         Args:
             context: Source passage.
-            answer: The answer the question should target.
+            answer: Optional target answer. If provided, the question is
+                generated to match it (answer-aware mode). If None, the
+                model is asked to pick its own salient answer and generate
+                a matching question (fully automatic mode).
 
         Returns:
-            Generated question string.
+            Tuple of (answer, question). In automatic mode, `answer` is the
+            model's own chosen answer, not necessarily the input `answer`.
         """
-        input_text = f"generate question: context: {context} answer: {answer}"
-        return self._generate(input_text)
+        answer_for_input = answer if answer is not None else MASK_TOKEN
+        input_text = f"generate qa pair: context: {context} answer: {answer_for_input}"
+        raw_output = self._generate(input_text)
+
+        if SEP_TOKEN not in raw_output:
+            # Malformed generation without a separator; treat the whole
+            # output as the question and fall back to the given answer.
+            return (answer or ""), raw_output.strip()
+
+        generated_answer, _, generated_question = raw_output.partition(SEP_TOKEN)
+        return generated_answer.strip(), generated_question.strip()
 
     def generate_answer(self, context: str, question: str) -> str:
-        """Generate an answer given a context and a question.
+        """Generate an answer given a context and a user-supplied question.
 
         Args:
             context: Source passage.
@@ -120,22 +137,16 @@ class QuizGenerator:
     def generate_quiz(self, context: str, answer: str | None = None) -> Quiz:
         """Generate a full multiple-choice quiz item from raw context.
 
-        If `answer` is not provided, an answer is first extracted by asking
-        the model a generic question about the context.
-
         Args:
             context: Source passage to build a quiz from.
             answer: Optional pre-specified answer to build the question
-                around. If None, a placeholder question is used to have the
-                model surface a salient answer first.
+                around (answer-aware mode). If None, the model picks its
+                own answer (fully automatic mode).
 
         Returns:
             A Quiz object containing the question, answer, and distractors.
         """
-        if answer is None:
-            answer = self.generate_answer(context, question="What is discussed in this text?")
+        generated_answer, question = self.generate_qa_pair(context, answer)
+        distractors = self.generate_distractors(context, question, generated_answer)
 
-        question = self.generate_question(context, answer)
-        distractors = self.generate_distractors(context, question, answer)
-
-        return Quiz(question=question, answer=answer, distractors=distractors)
+        return Quiz(question=question, answer=generated_answer, distractors=distractors)

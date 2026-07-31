@@ -1,4 +1,4 @@
-"""Fine-tune a T5 model jointly on QA, QG, and Distractor generation tasks.
+"""Fine-tune a T5 model jointly on qa_pair, QA, and Distractor generation.
 
 Pulls the training dataset from a versioned W&B Artifact (created by
 data/build_dataset.py), trains with a single Seq2SeqTrainer loop across all
@@ -24,10 +24,10 @@ from transformers import (
     Seq2SeqTrainingArguments,
 )
 
-from config import TrainingConfig
+from config import WANDB_PROJECT, TrainingConfig
 
-WANDB_PROJECT = "multi-task-t5-quiz-generator"
-SPECIAL_TOKENS = ["<sep>"]
+SPECIAL_TOKENS = ["<sep>", "[MASK]"]
+MODEL_ARTIFACT_NAME = "multitask-t5-model"
 
 
 @dataclass
@@ -80,7 +80,7 @@ def get_git_commit() -> str | None:
 
 
 def load_tokenizer_and_model(model_name: str) -> tuple[AutoTokenizer, AutoModelForSeq2SeqLM]:
-    """Load the tokenizer and model, adding the custom distractor separator token.
+    """Load the tokenizer and model, adding custom special tokens.
 
     Args:
         model_name: HuggingFace model id or local path.
@@ -181,9 +181,8 @@ def train(config: TrainingConfig) -> None:
     trainer.save_model(config.output_dir)
     tokenizer.save_pretrained(config.output_dir)
 
-    # Log the trained model as a versioned Artifact, linked to this run.
     model_artifact = wandb.Artifact(
-        name="multitask-t5-model",
+        name=MODEL_ARTIFACT_NAME,
         type="model",
         metadata={
             "base_model": config.model_name,

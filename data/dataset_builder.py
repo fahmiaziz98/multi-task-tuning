@@ -1,9 +1,15 @@
-"""Build the multi-task dataset from SQuAD (QA/QG) and RACE (Distractor),
+"""Build the multi-task dataset from SQuAD (QA-pair/QA) and RACE (Distractor),
 and log it as a versioned W&B Artifact.
 
-Downloads the source datasets via HuggingFace `datasets`, converts each into
-the unified `Example` schema, splits into train/val/test, writes JSONL
-files, and logs them as a W&B dataset artifact for lineage tracking.
+The qa_pair task teaches the model two modes at once, controlled by
+MASKING_CHANCE:
+    - Answer-aware (70%): given context + a real answer, generate the
+      matching question.
+    - Fully automatic (30%): given context + MASK_TOKEN in place of the
+      answer, the model must pick its own salient answer AND generate the
+      question for it. The target always echoes back "answer <sep>
+      question" regardless of mode, so the model's chosen answer is always
+      recoverable from the output.
 
 Usage:
     python data/build_dataset.py --output_dir ./data/processed
@@ -12,76 +18,93 @@ Usage:
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 
 import wandb
 from datasets import load_dataset
 from loguru import logger
 
-from schema import DISTRACTOR_SEP, TaskType, TrainingTask
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from config import WANDB_PROJECT  # noqa: E402
+
+from schema import DISTRACTOR_SEP, MASK_TOKEN, SEP_TOKEN, TaskType, TrainingTask
 
 MAX_CONTEXT_CHARS = 2000
 MAX_EXAMPLES_PER_TASK = 16_667
+MASKING_CHANCE = 0.3
 VAL_RATIO = 0.05
 TEST_RATIO = 0.05
 RANDOM_SEED = 42
-WANDB_PROJECT = "multi-task-t5-quiz-generator"
+DATASET_ARTIFACT_NAME = "qg-qa-distractor-dataset"
 
 
-def build_question_answer_generation(squad_split, task_type: TaskType) -> list[TrainingTask]:
-    """
-    Convert a SQuAD split into:
-        QG examples (context+answer -> question)
-        QA examples (context+question -> answer)
+def build_qa_pair_examples(squad_split, seed: int) -> list[TrainingTask]:
+    """Convert a SQuAD split into qa_pair examples with answer masking.
 
     Args:
-        squad_split: A Huggingface SQuAD dataset split.
+        squad_split: A HuggingFace SQuAD dataset split.
+        seed: Random seed controlling which rows get their answer masked.
 
     Returns:
-        List of QG example object. Items without a validation answer are skipped.
+        List of qa_pair TrainingTask objects. Rows without a valid answer
+        are skipped.
     """
+    rng = random.Random(seed)
     examples = []
-    for row in squad_split:
 
-        answer = row["answers"]["text"]
-        if not answer:
+    for row in squad_split:
+        answers = row["answers"]["text"]
+        if not answers:
             continue
 
         context = row["context"][:MAX_CONTEXT_CHARS]
+        answer = answers[0]
         question = row["question"]
 
-        input_text = ""
-        target = ""
+        answer_for_input = MASK_TOKEN if rng.random() < MASKING_CHANCE else answer
+        input_text = f"generate qa pair: context: {context} answer: {answer_for_input}"
+        target = f"{answer} {SEP_TOKEN} {question}"
 
-        if task_type.value == TaskType.QG.value:
-            input_text = f"generate question: context: {context} answer: {answer[0]}"
-            target = question
-
-        elif task_type.value == TaskType.QA.value:
-            input_text = f"answer the question: question: {question} context: {context}"
-            target = answer[0]
-
-        if input_text and target:
-            examples.append(
-                TrainingTask(
-                    task_type,
-                    input_text,
-                    target
-                )
-            )
+        examples.append(TrainingTask(TaskType.QA_PAIR, input_text, target))
 
     return examples
 
 
-def build_distractor_generation(race_split) -> list[TrainingTask]:
-    """
-    Convert a RACE split into  distractor generation examples
+def build_qa_examples(squad_split) -> list[TrainingTask]:
+    """Convert a SQuAD split into QA examples (context+question -> answer).
+
+    This is the "user supplies the question" direction, distinct from
+    qa_pair where the model invents its own question.
 
     Args:
-        race_split: A Huggingface RACE dataset split.
+        squad_split: A HuggingFace SQuAD dataset split.
 
     Returns:
-        List of Distractor example object. Mallformed rows are skipped.
+        List of QA TrainingTask objects. Rows without a valid answer are
+        skipped.
+    """
+    examples = []
+    for row in squad_split:
+        answers = row["answers"]["text"]
+        if not answers:
+            continue
+
+        context = row["context"][:MAX_CONTEXT_CHARS]
+        input_text = f"answer the question: question: {row['question']} context: {context}"
+        examples.append(TrainingTask(TaskType.QA, input_text, answers[0]))
+
+    return examples
+
+
+def build_distractor_examples(race_split) -> list[TrainingTask]:
+    """Convert a RACE split into distractor generation examples.
+
+    Args:
+        race_split: A HuggingFace RACE dataset split.
+
+    Returns:
+        List of Distractor TrainingTask objects. Malformed rows are skipped.
     """
     examples = []
     for row in race_split:
@@ -96,50 +119,42 @@ def build_distractor_generation(race_split) -> list[TrainingTask]:
         distractors = [opt for i, opt in enumerate(options) if i != answer_idx]
 
         context = row["article"][:MAX_CONTEXT_CHARS]
-
+        # Note: a space was previously missing between context and
+        # "question:" here, causing the two to run together as one token.
         input_text = (
-            f"generate distractor: context: {context}"
+            f"generate distractors: context: {context} "
             f"question: {row['question']} answer: {correct_answer}"
         )
         target = DISTRACTOR_SEP.join(distractors)
 
-        examples.append(
-            TrainingTask(
-                TaskType.DISTRACTOR,
-                input_text,
-                target
-            )
-        )
+        examples.append(TrainingTask(TaskType.DISTRACTOR, input_text, target))
+
     return examples
 
 
-def sample_examples(
-    examples: list[TrainingTask],
-    max_examples: int,
-    seed: int,
-) -> list[TrainingTask]:
-    """
-    Sample a subset of examples using the given seed.
+def sample_examples(examples: list[TrainingTask], max_examples: int, seed: int) -> list[TrainingTask]:
+    """Sample a bounded subset of examples for a balanced dataset size.
 
     Args:
         examples: List of examples to sample from.
         max_examples: Maximum number of examples to return.
         seed: Random seed for reproducibility.
+
+    Returns:
+        The original list if it's already within the limit, otherwise a
+        shuffled random subset of size `max_examples`.
     """
     if len(examples) <= max_examples:
         return examples
 
     rng = random.Random(seed)
-    sampled = examples.copy()
-    rng.shuffle(sampled)
-    return sampled[:max_examples]
+    shuffled = examples.copy()
+    rng.shuffle(shuffled)
+    return shuffled[:max_examples]
 
 
 def split_examples(
-    examples: list[TrainingTask],
-    val_ratio: float,
-    test_ratio: float,
-    seed: int
+    examples: list[TrainingTask], val_ratio: float, test_ratio: float, seed: int
 ) -> tuple[list[TrainingTask], list[TrainingTask], list[TrainingTask]]:
     """Shuffle and split examples into train/val/test subsets.
 
@@ -188,17 +203,18 @@ def log_dataset_artifact(output_path: Path, counts: dict) -> None:
     """
     run = wandb.init(project=WANDB_PROJECT, job_type="build-dataset")
     artifact = wandb.Artifact(
-        name="qg-qa-distractor-dataset",
+        name=DATASET_ARTIFACT_NAME,
         type="dataset",
         metadata={
             "source_versions": {"squad": "plain_text/1.1", "race": "all"},
+            "masking_chance": MASKING_CHANCE,
             **counts,
         },
     )
     artifact.add_dir(str(output_path))
     run.log_artifact(artifact)
     run.finish()
-    logger.info("Dataset logged as W&B Artifact 'qg-qa-distractor-dataset'")
+    logger.info(f"Dataset logged as W&B Artifact '{DATASET_ARTIFACT_NAME}'")
 
 
 def main(output_dir: str) -> None:
@@ -208,7 +224,6 @@ def main(output_dir: str) -> None:
         output_dir: Directory where the resulting JSONL files are written.
     """
     output_path = Path(output_dir)
-    rng = random.Random(RANDOM_SEED)
 
     logger.info("Loading SQuAD...")
     squad = load_dataset("squad")["train"]
@@ -216,27 +231,27 @@ def main(output_dir: str) -> None:
     logger.info("Loading RACE (this can take a while)...")
     race = load_dataset("race", "all")["train"]
 
-    logger.info("Building QA examples...")
-    qa_examples = build_question_answer_generation(squad, TaskType.QA)
+    logger.info("Building qa_pair examples (with answer masking)...")
+    qa_pair_examples = build_qa_pair_examples(squad, RANDOM_SEED)
 
-    logger.info("Building QG examples...")
-    qg_examples = build_question_answer_generation(squad, TaskType.QG)
+    logger.info("Building QA examples...")
+    qa_examples = build_qa_examples(squad)
 
     logger.info("Building Distractor examples...")
-    distractor_examples = build_distractor_generation(race)
+    distractor_examples = build_distractor_examples(race)
 
-    logger.info("Sampling examples...")
+    logger.info("Sampling examples to a balanced size per task...")
+    qa_pair_examples = sample_examples(qa_pair_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
     qa_examples = sample_examples(qa_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
-    qg_examples = sample_examples(qg_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
     distractor_examples = sample_examples(distractor_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
 
     logger.info(
-        f"Counts -> QA: {len(qa_examples)}, QG: {len(qg_examples)}, "
-        f"Distractor: {len(distractor_examples)}"
+        f"Counts -> qa_pair: {len(qa_pair_examples)}, qa: {len(qa_examples)}, "
+        f"distractor: {len(distractor_examples)}"
     )
 
     all_train, all_val, all_test = [], [], []
-    for task_examples in (qa_examples, qg_examples, distractor_examples):
+    for task_examples in (qa_pair_examples, qa_examples, distractor_examples):
         train, val, test = split_examples(task_examples, VAL_RATIO, TEST_RATIO, RANDOM_SEED)
         all_train.extend(train)
         all_val.extend(val)
@@ -256,13 +271,13 @@ def main(output_dir: str) -> None:
         "val_count": len(all_val),
         "test_count": len(all_test),
     }
-    print(f"Done. {counts}")
+    logger.info(f"Done. {counts}")
 
     log_dataset_artifact(output_path, counts)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build the multi-task QG/QA/Distractor dataset.")
+    parser = argparse.ArgumentParser(description="Build the multi-task qa_pair/QA/Distractor dataset.")
     parser.add_argument(
         "--output_dir",
         type=str,
