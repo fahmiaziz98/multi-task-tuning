@@ -1,0 +1,13 @@
+transformers==4.44.2
+datasets==2.21.0
+torch==2.4.0
+evaluate==0.4.2
+rouge-score==0.1.2
+sacrebleu==2.4.3
+sentencepiece==0.2.0
+accelerate==0.34.0
+optimum[onnxruntime]==1.22.0
+numpy==1.26.4
+wandb==0.17.9
+huggingface_hub==0.24.6
+loguru==0.7.2
