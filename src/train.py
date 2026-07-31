@@ -26,7 +26,7 @@ from transformers import (
 
 from config import TrainingConfig
 
-WANDB_PROJECT = "multitask-t5-quiz-generator"
+WANDB_PROJECT = "multi-task-t5-quiz-generator"
 SPECIAL_TOKENS = ["<sep>"]
 
 
