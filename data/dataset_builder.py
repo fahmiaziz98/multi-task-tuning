@@ -21,6 +21,7 @@ from loguru import logger
 from schema import DISTRACTOR_SEP, TaskType, TrainingTask
 
 MAX_CONTEXT_CHARS = 2000
+MAX_EXAMPLES_PER_TASK = 16_667
 VAL_RATIO = 0.05
 TEST_RATIO = 0.05
 RANDOM_SEED = 42
@@ -112,6 +113,28 @@ def build_distractor_generation(race_split) -> list[TrainingTask]:
     return examples
 
 
+def sample_examples(
+    examples: list[TrainingTask],
+    max_examples: int,
+    seed: int,
+) -> list[TrainingTask]:
+    """
+    Sample a subset of examples using the given seed.
+
+    Args:
+        examples: List of examples to sample from.
+        max_examples: Maximum number of examples to return.
+        seed: Random seed for reproducibility.
+    """
+    if len(examples) <= max_examples:
+        return examples
+
+    rng = random.Random(seed)
+    sampled = examples.copy()
+    rng.shuffle(sampled)
+    return sampled[:max_examples]
+
+
 def split_examples(
     examples: list[TrainingTask],
     val_ratio: float,
@@ -185,6 +208,7 @@ def main(output_dir: str) -> None:
         output_dir: Directory where the resulting JSONL files are written.
     """
     output_path = Path(output_dir)
+    rng = random.Random(RANDOM_SEED)
 
     logger.info("Loading SQuAD...")
     squad = load_dataset("squad")["train"]
@@ -200,6 +224,11 @@ def main(output_dir: str) -> None:
 
     logger.info("Building Distractor examples...")
     distractor_examples = build_distractor_generation(race)
+
+    logger.info("Sampling examples...")
+    qa_examples = sample_examples(qa_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
+    qg_examples = sample_examples(qg_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
+    distractor_examples = sample_examples(distractor_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
 
     logger.info(
         f"Counts -> QA: {len(qa_examples)}, QG: {len(qg_examples)}, "
