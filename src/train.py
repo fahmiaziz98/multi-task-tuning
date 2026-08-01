@@ -151,6 +151,7 @@ def train(config: TrainingConfig) -> None:
         fp16=config.fp16,
         max_grad_norm=config.max_grad_norm,
         seed=config.seed,
+        label_smoothing_factor=0.1,
         save_safetensors=False,
         eval_strategy="epoch",
         save_strategy="epoch",
@@ -204,6 +205,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--task", type=str, required=True, choices=["qa_pair", "distractor"], help="Which task to train."
     )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default=None,
+        help="Base model to fine-tune (e.g. t5-small, google/flan-t5-small). "
+             "Defaults to the value in TrainingConfig if not set.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Number of training epochs. Defaults to the value in TrainingConfig if not set.",
+    )
     args = parser.parse_args()
 
-    train(TrainingConfig(task=args.task))
+    config = TrainingConfig(task=args.task)
+    if args.model_name is not None:
+        config.model_name = args.model_name
+    if args.epochs is not None:
+        config.num_train_epochs = args.epochs
+
+    train(config)
