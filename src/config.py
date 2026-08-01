@@ -30,7 +30,7 @@ class TrainingConfig:
         hf_repo_id: Target HF Hub repo id, used only if push_to_hub is True.
     """
 
-    model_name: str = "t5-small"
+    model_name: str = "t5-base"
     output_dir: str = "./checkpoints/multitask-t5"
 
     max_input_length: int = 512

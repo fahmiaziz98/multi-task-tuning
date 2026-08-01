@@ -58,7 +58,11 @@ class QuizGenerator:
 
         with torch.no_grad():
             output_ids = self.model.generate(
-                **encoded, max_length=DEFAULT_MAX_TARGET_LENGTH, num_beams=DEFAULT_NUM_BEAMS
+                **encoded,
+                max_length=DEFAULT_MAX_TARGET_LENGTH,
+                do_sample=True,
+                top_k=50,
+                top_p=0.9
             )
         return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
 

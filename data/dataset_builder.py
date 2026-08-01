@@ -1,6 +1,7 @@
 import argparse
 import json
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -13,14 +14,18 @@ from config import WANDB_PROJECT  # noqa: E402
 
 from schema import DISTRACTOR_SEP, MASK_TOKEN, SEP_TOKEN, TaskType, TrainingTask
 
-
 MAX_CONTEXT_CHARS = 2000
-MAX_EXAMPLES_PER_TASK = 25_000
+MAX_EXAMPLES_PER_TASK = 16_667
 MASKING_CHANCE = 0.3
 VAL_RATIO = 0.05
 TEST_RATIO = 0.05
 RANDOM_SEED = 42
 DATASET_ARTIFACT_NAME = "qa-pair-distractor-dataset"
+
+# Synthetic short-answer distractor settings.
+SHORT_ANSWER_MAX_WORDS = 3
+NUM_DISTRACTORS = 3
+NUMERIC_SHIFT_RANGE = (1, 50)  # +/- range applied to numeric answers
 
 
 def build_qa_pair_examples(squad_split, seed: int) -> list[TrainingTask]:
@@ -47,8 +52,7 @@ def build_qa_pair_examples(squad_split, seed: int) -> list[TrainingTask]:
         question = row["question"]
 
         answer_for_input = MASK_TOKEN if rng.random() < MASKING_CHANCE else answer
-        # Short field (answer/mask) first, long context last.
-        input_text = f"generate quiz: answer: {answer_for_input} context: {context}"
+        input_text = f"generate qa pair: answer: {answer_for_input} context: {context}"
         target = f"{answer} {SEP_TOKEN} {question}"
 
         examples.append(TrainingTask(TaskType.QA_PAIR, input_text, target))
@@ -78,13 +82,147 @@ def build_distractor_examples(race_split) -> list[TrainingTask]:
         distractors = [opt for i, opt in enumerate(options) if i != answer_idx]
 
         context = row["article"][:MAX_CONTEXT_CHARS]
-        # Short fields (question/answer) first, long context last.
         input_text = (
             f"generate distractor: question: {row['question']} "
             f"answer: {correct_answer} context: {context}"
         )
         target = DISTRACTOR_SEP.join(distractors)
 
+        examples.append(TrainingTask(TaskType.DISTRACTOR, input_text, target))
+
+    return examples
+
+
+def _extract_numbers_from_text(text: str) -> list[str]:
+    """Extract standalone numeric tokens (years, counts, etc.) from text.
+
+    Args:
+        text: Text to scan.
+
+    Returns:
+        List of matched number strings (as they appear, no dedup).
+    """
+    return re.findall(r"\b\d+\b", text)
+
+
+def _shift_number(value: str, rng: random.Random) -> str:
+    """Produce a plausible wrong number by shifting a numeric string.
+
+    Args:
+        value: Original numeric string (e.g. a year or count).
+        rng: Random generator for the shift amount and direction.
+
+    Returns:
+        A shifted numeric string. If `value` is not purely numeric, it is
+        returned unchanged (defensive fallback, should not normally happen
+        given the caller only invokes this on digit-only answers).
+    """
+    if not value.isdigit():
+        return value
+    shift = rng.randint(*NUMERIC_SHIFT_RANGE) * rng.choice([-1, 1])
+    shifted = max(0, int(value) + shift)
+    return str(shifted)
+
+
+def _build_numeric_distractors(answer: str, context: str, rng: random.Random) -> list[str]:
+    """Build distractors for a numeric answer using in-context numbers and shifts.
+
+    Args:
+        answer: The correct numeric answer.
+        context: Source passage, scanned for other numbers to reuse as
+            distractors (usually more plausible than a fully synthetic one).
+        rng: Random generator.
+
+    Returns:
+        List of exactly NUM_DISTRACTORS distractor strings, guaranteed
+        distinct from `answer` and from each other.
+    """
+    candidates = {n for n in _extract_numbers_from_text(context) if n != answer}
+
+    while len(candidates) < NUM_DISTRACTORS:
+        candidates.add(_shift_number(answer, rng))
+        candidates.discard(answer)
+
+    return rng.sample(sorted(candidates), NUM_DISTRACTORS)
+
+
+def _build_text_distractors(
+    answer: str, answer_pool: list[str], rng: random.Random
+) -> list[str]:
+    """Build distractors for a short text answer by sampling similar-length answers.
+
+    Args:
+        answer: The correct answer.
+        answer_pool: Pool of other short SQuAD answers to sample from,
+            pre-filtered to a similar word-count bucket by the caller.
+        rng: Random generator.
+
+    Returns:
+        List of exactly NUM_DISTRACTORS distractor strings, guaranteed
+        distinct from `answer` and from each other. Falls back to sampling
+        without the length constraint if the pool is too small.
+    """
+    candidates = [a for a in answer_pool if a.lower() != answer.lower()]
+    if len(candidates) < NUM_DISTRACTORS:
+        return []  # Pool too small; caller skips this example.
+
+    return rng.sample(candidates, NUM_DISTRACTORS)
+
+
+def build_synthetic_short_distractor_examples(squad_split, seed: int) -> list[TrainingTask]:
+    """Build distractor examples for short factual answers, derived from SQuAD.
+
+    Closes the distribution gap between qa_pair's short SQuAD-style answers
+    and the distractor model, which otherwise only ever saw RACE's long
+    phrase-style answers during training.
+
+    Args:
+        squad_split: A HuggingFace SQuAD dataset split.
+        seed: Random seed for sampling.
+
+    Returns:
+        List of Distractor TrainingTask objects built from short answers.
+    """
+    rng = random.Random(seed)
+
+    # First pass: collect all short answers, bucketed by word count, to use
+    # as a sampling pool for text-based distractors.
+    short_answer_pool_by_length: dict[int, list[str]] = {}
+    rows = []
+    for row in squad_split:
+        answers = row["answers"]["text"]
+        if not answers:
+            continue
+        answer = answers[0]
+        word_count = len(answer.split())
+        if word_count == 0 or word_count > SHORT_ANSWER_MAX_WORDS:
+            continue
+
+        rows.append(row)
+        short_answer_pool_by_length.setdefault(word_count, []).append(answer)
+
+    # Second pass: build a distractor example per short-answer row.
+    examples = []
+    for row in rows:
+        answer = row["answers"]["text"][0]
+        question = row["question"]
+        context = row["context"][:MAX_CONTEXT_CHARS]
+        word_count = len(answer.split())
+
+        if answer.isdigit():
+            distractors = _build_numeric_distractors(answer, context, rng)
+        else:
+            pool = short_answer_pool_by_length.get(word_count, [])
+            distractors = _build_text_distractors(answer, pool, rng)
+
+        if not distractors:
+            continue
+
+        input_text = (
+            f"generate distractor: question: {question} "
+            f"answer: {answer} context: {context}"
+        )
+        target = DISTRACTOR_SEP.join(distractors)
         examples.append(TrainingTask(TaskType.DISTRACTOR, input_text, target))
 
     return examples
@@ -192,14 +330,22 @@ def main(output_dir: str) -> None:
     logger.info("Building qa_pair examples (with answer masking)...")
     qa_pair_examples = build_qa_pair_examples(squad, RANDOM_SEED)
 
-    logger.info("Building distractor examples...")
-    distractor_examples = build_distractor_examples(race)
+    logger.info("Building distractor examples from RACE (long-phrase answers)...")
+    race_distractor_examples = build_distractor_examples(race)
+
+    logger.info("Building synthetic distractor examples from SQuAD (short answers)...")
+    synthetic_distractor_examples = build_synthetic_short_distractor_examples(squad, RANDOM_SEED)
+
+    distractor_examples = race_distractor_examples + synthetic_distractor_examples
 
     logger.info("Sampling examples to a balanced size per task...")
     qa_pair_examples = sample_examples(qa_pair_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
     distractor_examples = sample_examples(distractor_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
 
-    logger.info(f"Counts -> qa_pair: {len(qa_pair_examples)}, distractor: {len(distractor_examples)}")
+    logger.info(
+        f"Counts -> qa_pair: {len(qa_pair_examples)}, distractor: {len(distractor_examples)} "
+        f"(race: {len(race_distractor_examples)}, synthetic: {len(synthetic_distractor_examples)})"
+    )
 
     all_train, all_val, all_test = [], [], []
     for task_examples in (qa_pair_examples, distractor_examples):
