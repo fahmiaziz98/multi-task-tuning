@@ -67,16 +67,16 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     num_train_epochs: int = 3
     warmup_steps: int = 500
-#    optim: str = "adafactor"
+    optim: str = "adafactor"
 
-    fp16: bool = True
+    fp16: bool = False
     max_grad_norm: float = 1.0
     seed: int = 42
 
     run_name: str = field(default_factory=lambda: f"run-{uuid.uuid4().hex[:8]}")
     dataset_artifact: str = ""
 
-    push_to_hub: bool = False
+    push_to_hub: bool = True
     hf_repo_id: str = ""
 
     def __post_init__(self):
