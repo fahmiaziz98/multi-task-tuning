@@ -151,6 +151,7 @@ def train(config: TrainingConfig) -> None:
         fp16=config.fp16,
         max_grad_norm=config.max_grad_norm,
         seed=config.seed,
+        save_safetensors=False,
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
