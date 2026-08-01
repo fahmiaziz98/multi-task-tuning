@@ -5,6 +5,7 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 from schema import DISTRACTOR_SEP, MASK_TOKEN, SEP_TOKEN
 
+
 DEFAULT_MAX_TARGET_LENGTH = 64
 DEFAULT_NUM_BEAMS = 4
 
@@ -24,27 +25,26 @@ class Quiz:
     distractors: list[str]
 
 
-class QuizGenerator:
-    """Generates full multiple-choice quiz items from raw text context."""
+class _SingleTaskModel:
+    """Thin wrapper around one fine-tuned T5 checkpoint for text generation."""
 
-    def __init__(self, checkpoint: str, device: str | None = None):
-        """Load the fine-tuned model and tokenizer.
+    def __init__(self, checkpoint: str, device: str):
+        """Load a tokenizer and model for one task.
 
         Args:
-            checkpoint: Local path or HF Hub repo id of the fine-tuned model.
-            device: Torch device to run on. Defaults to "cuda" if available,
-                otherwise "cpu".
+            checkpoint: Local path or HF Hub repo id.
+            device: Torch device to run on.
 
         Raises:
             OSError: If the checkpoint cannot be loaded.
         """
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
         self.tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(checkpoint).to(self.device)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(checkpoint).to(device)
         self.model.eval()
 
-    def _generate(self, input_text: str) -> str:
-        """Run a single generation call for one task-prefixed input string.
+    def generate(self, input_text: str) -> str:
+        """Run generation for a single formatted input string.
 
         Args:
             input_text: Fully formatted input, including the task prefix.
@@ -58,33 +58,48 @@ class QuizGenerator:
 
         with torch.no_grad():
             output_ids = self.model.generate(
-                **encoded,
-                max_length=DEFAULT_MAX_TARGET_LENGTH,
-                do_sample=True,
-                top_k=50,
-                top_p=0.9
+                **encoded, max_length=DEFAULT_MAX_TARGET_LENGTH, num_beams=DEFAULT_NUM_BEAMS
             )
         return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+
+class QuizGenerator:
+    """Generates full multiple-choice quiz items using two separate models."""
+
+    def __init__(
+        self,
+        qa_pair_checkpoint: str,
+        distractor_checkpoint: str,
+        device: str | None = None,
+    ):
+        """Load both fine-tuned models.
+
+        Args:
+            qa_pair_checkpoint: Local path or HF Hub repo id of the
+                qa_pair model.
+            distractor_checkpoint: Local path or HF Hub repo id of the
+                distractor model.
+            device: Torch device to run both models on. Defaults to "cuda"
+                if available, otherwise "cpu".
+        """
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self._qa_pair_model = _SingleTaskModel(qa_pair_checkpoint, self.device)
+        self._distractor_model = _SingleTaskModel(distractor_checkpoint, self.device)
 
     def generate_qa_pair(self, context: str, answer: str | None = None) -> tuple[str, str]:
         """Generate an (answer, question) pair from context.
 
         Args:
             context: Source passage.
-            answer: Optional target answer. If provided, the question is
-                generated to match it (answer-aware mode). If None, the
-                model is asked to pick its own salient answer and generate
-                a matching question (fully automatic mode).
+            answer: Optional target answer (answer-aware mode). If None,
+                the model picks its own salient answer (automatic mode).
 
         Returns:
-            Tuple of (answer, question). In automatic mode, `answer` is the
-            model's own chosen answer, not necessarily the input `answer`.
+            Tuple of (answer, question).
         """
         answer_for_input = answer if answer is not None else MASK_TOKEN
-        # Short field (answer/mask) first, long context last — matches the
-        # training-time prompt ordering so truncation behaves the same way.
-        input_text = f"generate quiz: answer: {answer_for_input} context: {context}"
-        raw_output = self._generate(input_text)
+        input_text = f"generate qa pair: answer: {answer_for_input} context: {context}"
+        raw_output = self._qa_pair_model.generate(input_text)
 
         if SEP_TOKEN not in raw_output:
             return (answer or ""), raw_output.strip()
@@ -103,9 +118,8 @@ class QuizGenerator:
         Returns:
             List of distractor strings (empty entries filtered out).
         """
-        # Short fields (question/answer) first, long context last.
         input_text = f"generate distractor: question: {question} answer: {answer} context: {context}"
-        raw_output = self._generate(input_text)
+        raw_output = self._distractor_model.generate(input_text)
         return [d.strip() for d in raw_output.split(DISTRACTOR_SEP.strip()) if d.strip()]
 
     def generate_quiz(self, context: str, answer: str | None = None) -> Quiz:
@@ -113,9 +127,7 @@ class QuizGenerator:
 
         Args:
             context: Source passage to build a quiz from.
-            answer: Optional pre-specified answer to build the question
-                around (answer-aware mode). If None, the model picks its
-                own answer (fully automatic mode).
+            answer: Optional pre-specified answer (answer-aware mode).
 
         Returns:
             A Quiz object containing the question, answer, and distractors.

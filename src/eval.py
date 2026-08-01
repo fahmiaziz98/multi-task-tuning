@@ -2,7 +2,6 @@ import argparse
 import json
 import re
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import evaluate as hf_evaluate
@@ -12,9 +11,9 @@ from loguru import logger
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data"))
-from schema import DISTRACTOR_SEP, MASK_TOKEN, SEP_TOKEN, TaskType  # noqa: E402
-
+from schema import DISTRACTOR_SEP, MASK_TOKEN, SEP_TOKEN  # noqa: E402
 from config import WANDB_PROJECT
+
 
 BATCH_SIZE = 16
 MAX_TARGET_LENGTH = 64
@@ -110,27 +109,17 @@ def generate_predictions(
     return predictions
 
 
-def load_test_examples(test_file: str) -> dict[str, list[dict]]:
-    """Load and group test examples by task.
+def load_examples(test_file: str) -> list[dict]:
+    """Load a task's test examples from JSONL.
 
     Args:
         test_file: Path to the test JSONL file.
 
     Returns:
-        Dict mapping task name to list of example dicts.
-
-    Raises:
-        ValueError: If an example has an unrecognized task label.
+        List of example dicts.
     """
-    grouped = defaultdict(list)
     with open(test_file, encoding="utf-8") as f:
-        for line in f:
-            example = json.loads(line)
-            task = example["task"]
-            if task not in {t.value for t in TaskType}:
-                raise ValueError(f"Unrecognized task label: {task}")
-            grouped[task].append(example)
-    return grouped
+        return [json.loads(line) for line in f]
 
 
 def split_qa_pair_target(text: str) -> tuple[str, str]:
@@ -140,9 +129,8 @@ def split_qa_pair_target(text: str) -> tuple[str, str]:
         text: Raw text expected to contain the separator token once.
 
     Returns:
-        Tuple of (answer_part, question_part). If the separator is missing
-        (a malformed generation), the whole text is returned as the answer
-        part and the question part is an empty string.
+        Tuple of (answer_part, question_part). If the separator is missing,
+        the whole text is returned as the answer part.
     """
     if SEP_TOKEN not in text:
         return text.strip(), ""
@@ -151,7 +139,7 @@ def split_qa_pair_target(text: str) -> tuple[str, str]:
 
 
 def evaluate_qa_pair(model, tokenizer, examples: list[dict], device: str) -> dict:
-    """Evaluate the qa_pair task, overall and broken down by mode.
+    """Evaluate the qa_pair model, overall and broken down by mode.
 
     Args:
         model: Fine-tuned model.
@@ -161,8 +149,8 @@ def evaluate_qa_pair(model, tokenizer, examples: list[dict], device: str) -> dic
 
     Returns:
         Dict with "answer_em", "answer_f1", "question_bleu",
-        "question_rougeL" (overall), plus the same four metrics prefixed
-        with "masked_" and "answer_aware_" for each mode separately.
+        "question_rougeL" (overall), plus the same metrics prefixed with
+        "masked_" and "answer_aware_" for each mode separately.
     """
     inputs = [ex["input_text"] for ex in examples]
     is_masked = [MASK_TOKEN in ex["input_text"] for ex in examples]
@@ -217,7 +205,7 @@ def evaluate_qa_pair(model, tokenizer, examples: list[dict], device: str) -> dic
 
 
 def evaluate_distractor(model, tokenizer, examples: list[dict], device: str) -> dict:
-    """Evaluate the Distractor task using distinct-n and validity rate.
+    """Evaluate the distractor model using distinct-n and validity rate.
 
     Args:
         model: Fine-tuned model.
@@ -226,8 +214,7 @@ def evaluate_distractor(model, tokenizer, examples: list[dict], device: str) -> 
         device: Torch device string.
 
     Returns:
-        Dict with "distinct_1", "distinct_2", and "validity_rate" (fraction
-        of generated distractors that are not identical to the gold answer).
+        Dict with "distinct_1", "distinct_2", and "validity_rate".
     """
     inputs = [ex["input_text"] for ex in examples]
     predictions = generate_predictions(model, tokenizer, inputs, device)
@@ -237,8 +224,8 @@ def evaluate_distractor(model, tokenizer, examples: list[dict], device: str) -> 
     total_count = 0
 
     for pred, ex in zip(predictions, examples):
-        # Gold answer now sits between "answer: " and " context:" since the
-        # field order was changed to put context last.
+        # Gold answer sits between "answer: " and " context:" since context
+        # is placed last in the prompt.
         gold_answer = ex["input_text"].split("answer: ")[-1].split(" context:")[0].strip().lower()
         distractors = [d.strip() for d in pred.split(DISTRACTOR_SEP.strip()) if d.strip()]
 
@@ -257,47 +244,50 @@ def evaluate_distractor(model, tokenizer, examples: list[dict], device: str) -> 
     }
 
 
-def evaluate_all(checkpoint: str, test_file: str) -> dict:
-    """Run evaluation for all tasks and return a combined report.
+EVALUATORS = {
+    "qa_pair": evaluate_qa_pair,
+    "distractor": evaluate_distractor,
+}
+
+
+def evaluate_task(task: str, checkpoint: str, test_file: str) -> dict:
+    """Run evaluation for a single task's model.
 
     Args:
+        task: Either "qa_pair" or "distractor".
         checkpoint: Path to the fine-tuned model checkpoint.
-        test_file: Path to the test JSONL file.
+        test_file: Path to that task's test JSONL file.
 
     Returns:
-        Dict mapping task name to its metric dict.
+        Dict of metric name to value.
+
+    Raises:
+        ValueError: If `task` is not a recognized task name.
     """
+    if task not in EVALUATORS:
+        raise ValueError(f"Unknown task '{task}'. Expected one of {list(EVALUATORS)}.")
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tokenizer = AutoTokenizer.from_pretrained(checkpoint)
     model = AutoModelForSeq2SeqLM.from_pretrained(checkpoint).to(device)
     model.eval()
 
-    grouped_examples = load_test_examples(test_file)
-
-    report = {}
-    if TaskType.QA_PAIR.value in grouped_examples:
-        report["qa_pair"] = evaluate_qa_pair(
-            model, tokenizer, grouped_examples[TaskType.QA_PAIR.value], device
-        )
-    if TaskType.DISTRACTOR.value in grouped_examples:
-        report["distractor"] = evaluate_distractor(
-            model, tokenizer, grouped_examples[TaskType.DISTRACTOR.value], device
-        )
-    return report
+    examples = load_examples(test_file)
+    return EVALUATORS[task](model, tokenizer, examples, device)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate the multi-task T5 model.")
+    parser = argparse.ArgumentParser(description="Evaluate a single-task T5 model.")
+    parser.add_argument("--task", type=str, required=True, choices=["qa_pair", "distractor"])
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--test_file", type=str, required=True)
     parser.add_argument("--run_id", type=str, required=True, help="W&B run ID (e.g. s2d46sr0)")
     args = parser.parse_args()
 
-    results = evaluate_all(args.checkpoint, args.test_file)
+    results = evaluate_task(args.task, args.checkpoint, args.test_file)
     print(json.dumps(results, indent=2))
 
-    run = wandb.init(project=WANDB_PROJECT, job_type="evaluation", name=f"eval-{args.run_id}")
-    for task, metrics in results.items():
-        wandb.log({f"{task}/{k}": v for k, v in metrics.items()})
+    run = wandb.init(project=WANDB_PROJECT, job_type="evaluation", name=f"eval-{args.run_id}", tags=[args.task])
+    wandb.log({f"{args.task}/{k}": v for k, v in results.items()})
     run.finish()
     logger.info(f"Eval metrics logged as W&B run 'eval-{args.run_id}'")

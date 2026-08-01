@@ -11,8 +11,8 @@ from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from config import WANDB_PROJECT  # noqa: E402
-
 from schema import DISTRACTOR_SEP, MASK_TOKEN, SEP_TOKEN, TaskType, TrainingTask
+
 
 MAX_CONTEXT_CHARS = 2000
 MAX_EXAMPLES_PER_TASK = 16_667
@@ -20,12 +20,13 @@ MASKING_CHANCE = 0.3
 VAL_RATIO = 0.05
 TEST_RATIO = 0.05
 RANDOM_SEED = 42
-DATASET_ARTIFACT_NAME = "qa-pair-distractor-dataset"
 
-# Synthetic short-answer distractor settings.
-SHORT_ANSWER_MAX_WORDS = 3
+QA_PAIR_ARTIFACT_NAME = "qa-pair-dataset"
+DISTRACTOR_ARTIFACT_NAME = "distractor-dataset"
+
+SHORT_ANSWER_MAX_WORDS = 10
 NUM_DISTRACTORS = 3
-NUMERIC_SHIFT_RANGE = (1, 50)  # +/- range applied to numeric answers
+NUMERIC_SHIFT_RANGE = (1, 50)
 
 
 def build_qa_pair_examples(squad_split, seed: int) -> list[TrainingTask]:
@@ -113,9 +114,7 @@ def _shift_number(value: str, rng: random.Random) -> str:
         rng: Random generator for the shift amount and direction.
 
     Returns:
-        A shifted numeric string. If `value` is not purely numeric, it is
-        returned unchanged (defensive fallback, should not normally happen
-        given the caller only invokes this on digit-only answers).
+        A shifted numeric string.
     """
     if not value.isdigit():
         return value
@@ -129,13 +128,11 @@ def _build_numeric_distractors(answer: str, context: str, rng: random.Random) ->
 
     Args:
         answer: The correct numeric answer.
-        context: Source passage, scanned for other numbers to reuse as
-            distractors (usually more plausible than a fully synthetic one).
+        context: Source passage, scanned for other numbers to reuse.
         rng: Random generator.
 
     Returns:
-        List of exactly NUM_DISTRACTORS distractor strings, guaranteed
-        distinct from `answer` and from each other.
+        List of exactly NUM_DISTRACTORS distractor strings.
     """
     candidates = {n for n in _extract_numbers_from_text(context) if n != answer}
 
@@ -153,18 +150,17 @@ def _build_text_distractors(
 
     Args:
         answer: The correct answer.
-        answer_pool: Pool of other short SQuAD answers to sample from,
-            pre-filtered to a similar word-count bucket by the caller.
+        answer_pool: Pool of other short SQuAD answers, pre-filtered to a
+            similar word-count bucket by the caller.
         rng: Random generator.
 
     Returns:
-        List of exactly NUM_DISTRACTORS distractor strings, guaranteed
-        distinct from `answer` and from each other. Falls back to sampling
-        without the length constraint if the pool is too small.
+        List of NUM_DISTRACTORS distractor strings, or an empty list if the
+        pool is too small (caller skips this example).
     """
     candidates = [a for a in answer_pool if a.lower() != answer.lower()]
     if len(candidates) < NUM_DISTRACTORS:
-        return []  # Pool too small; caller skips this example.
+        return []
 
     return rng.sample(candidates, NUM_DISTRACTORS)
 
@@ -185,8 +181,6 @@ def build_synthetic_short_distractor_examples(squad_split, seed: int) -> list[Tr
     """
     rng = random.Random(seed)
 
-    # First pass: collect all short answers, bucketed by word count, to use
-    # as a sampling pool for text-based distractors.
     short_answer_pool_by_length: dict[int, list[str]] = {}
     rows = []
     for row in squad_split:
@@ -201,7 +195,6 @@ def build_synthetic_short_distractor_examples(squad_split, seed: int) -> list[Tr
         rows.append(row)
         short_answer_pool_by_length.setdefault(word_count, []).append(answer)
 
-    # Second pass: build a distractor example per short-answer row.
     examples = []
     for row in rows:
         answer = row["answers"]["text"][0]
@@ -218,10 +211,7 @@ def build_synthetic_short_distractor_examples(squad_split, seed: int) -> list[Tr
         if not distractors:
             continue
 
-        input_text = (
-            f"generate distractor: question: {question} "
-            f"answer: {answer} context: {context}"
-        )
+        input_text = f"generate distractor: question: {question} answer: {answer} context: {context}"
         target = DISTRACTOR_SEP.join(distractors)
         examples.append(TrainingTask(TaskType.DISTRACTOR, input_text, target))
 
@@ -237,8 +227,7 @@ def sample_examples(examples: list[TrainingTask], max_examples: int, seed: int) 
         seed: Random seed for reproducibility.
 
     Returns:
-        The original list if it's already within the limit, otherwise a
-        shuffled random subset of size `max_examples`.
+        The original list if within the limit, otherwise a shuffled subset.
     """
     if len(examples) <= max_examples:
         return examples
@@ -290,34 +279,49 @@ def write_jsonl(examples: list[TrainingTask], path: Path) -> None:
             f.write(json.dumps(ex.to_dict(), ensure_ascii=False) + "\n")
 
 
-def log_dataset_artifact(output_path: Path, counts: dict) -> None:
-    """Log the processed dataset directory as a versioned W&B Artifact.
+def write_splits_and_log(
+    examples: list[TrainingTask],
+    output_dir: Path,
+    artifact_name: str,
+    extra_metadata: dict,
+) -> None:
+    """Split, write, and log one task's examples as a versioned W&B Artifact.
 
     Args:
-        output_path: Directory containing train/val/test JSONL files.
-        counts: Dict with per-split example counts, stored as metadata.
+        examples: All examples for this task (pre-sampling cap already applied).
+        output_dir: Directory to write this task's train/val/test JSONL files.
+        artifact_name: W&B artifact name for this task's dataset.
+        extra_metadata: Additional metadata to attach to the artifact.
     """
-    run = wandb.init(project=WANDB_PROJECT, job_type="build-dataset")
-    artifact = wandb.Artifact(
-        name=DATASET_ARTIFACT_NAME,
-        type="dataset",
-        metadata={
-            "source_versions": {"squad": "plain_text/1.1", "race": "all"},
-            "masking_chance": MASKING_CHANCE,
-            **counts,
-        },
-    )
-    artifact.add_dir(str(output_path))
+    train, val, test = split_examples(examples, VAL_RATIO, TEST_RATIO, RANDOM_SEED)
+
+    rng = random.Random(RANDOM_SEED)
+    rng.shuffle(train)
+    rng.shuffle(val)
+    rng.shuffle(test)
+
+    write_jsonl(train, output_dir / "train.jsonl")
+    write_jsonl(val, output_dir / "val.jsonl")
+    write_jsonl(test, output_dir / "test.jsonl")
+
+    counts = {"train_count": len(train), "val_count": len(val), "test_count": len(test)}
+    logger.info(f"[{artifact_name}] {counts}")
+
+    run = wandb.init(project=WANDB_PROJECT, job_type="build-dataset", name=f"build-{artifact_name}")
+    artifact = wandb.Artifact(name=artifact_name, type="dataset", metadata={**extra_metadata, **counts})
+    artifact.add_dir(str(output_dir))
     run.log_artifact(artifact)
     run.finish()
-    logger.info(f"Dataset logged as W&B Artifact '{DATASET_ARTIFACT_NAME}'")
+    logger.info(f"Dataset logged as W&B Artifact '{artifact_name}'")
 
 
 def main(output_dir: str) -> None:
-    """Build the full multi-task dataset, write splits, and log to W&B.
+    """Build both datasets independently, write splits, and log to W&B.
 
     Args:
-        output_dir: Directory where the resulting JSONL files are written.
+        output_dir: Parent directory; qa_pair and distractor data are
+            written to `output_dir/qa_pair/` and `output_dir/distractor/`
+            respectively.
     """
     output_path = Path(output_dir)
 
@@ -329,17 +333,12 @@ def main(output_dir: str) -> None:
 
     logger.info("Building qa_pair examples (with answer masking)...")
     qa_pair_examples = build_qa_pair_examples(squad, RANDOM_SEED)
-
-    logger.info("Building distractor examples from RACE (long-phrase answers)...")
-    race_distractor_examples = build_distractor_examples(race)
-
-    logger.info("Building synthetic distractor examples from SQuAD (short answers)...")
-    synthetic_distractor_examples = build_synthetic_short_distractor_examples(squad, RANDOM_SEED)
-
-    distractor_examples = race_distractor_examples + synthetic_distractor_examples
-
-    logger.info("Sampling examples to a balanced size per task...")
     qa_pair_examples = sample_examples(qa_pair_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
+
+    logger.info("Building distractor examples (RACE + synthetic short-answer)...")
+    race_distractor_examples = build_distractor_examples(race)
+    synthetic_distractor_examples = build_synthetic_short_distractor_examples(squad, RANDOM_SEED)
+    distractor_examples = race_distractor_examples + synthetic_distractor_examples
     distractor_examples = sample_examples(distractor_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
 
     logger.info(
@@ -347,39 +346,33 @@ def main(output_dir: str) -> None:
         f"(race: {len(race_distractor_examples)}, synthetic: {len(synthetic_distractor_examples)})"
     )
 
-    all_train, all_val, all_test = [], [], []
-    for task_examples in (qa_pair_examples, distractor_examples):
-        train, val, test = split_examples(task_examples, VAL_RATIO, TEST_RATIO, RANDOM_SEED)
-        all_train.extend(train)
-        all_val.extend(val)
-        all_test.extend(test)
-
-    rng = random.Random(RANDOM_SEED)
-    rng.shuffle(all_train)
-    rng.shuffle(all_val)
-    rng.shuffle(all_test)
-
-    write_jsonl(all_train, output_path / "train.jsonl")
-    write_jsonl(all_val, output_path / "val.jsonl")
-    write_jsonl(all_test, output_path / "test.jsonl")
-
-    counts = {
-        "train_count": len(all_train),
-        "val_count": len(all_val),
-        "test_count": len(all_test),
-    }
-    logger.info(f"Done. {counts}")
-
-    log_dataset_artifact(output_path, counts)
+    write_splits_and_log(
+        qa_pair_examples,
+        output_path / "qa_pair",
+        QA_PAIR_ARTIFACT_NAME,
+        {"source": "squad/plain_text/1.1", "masking_chance": MASKING_CHANCE},
+    )
+    write_splits_and_log(
+        distractor_examples,
+        output_path / "distractor",
+        DISTRACTOR_ARTIFACT_NAME,
+        {
+            "source_race": "race/all",
+            "source_synthetic": "squad/plain_text/1.1 (heuristic)",
+            "race_count": len(race_distractor_examples),
+            "synthetic_count": len(synthetic_distractor_examples),
+        },
+    )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build the qa_pair/distractor dataset.")
+    parser = argparse.ArgumentParser(description="Build the qa_pair and distractor datasets.")
     parser.add_argument(
         "--output_dir",
         type=str,
         default="./data/processed",
-        help="Directory to write train/val/test JSONL files.",
+        help="Parent directory for qa_pair/ and distractor/ subfolders.",
     )
     args = parser.parse_args()
     main(args.output_dir)
+

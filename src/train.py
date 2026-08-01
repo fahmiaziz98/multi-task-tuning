@@ -1,14 +1,4 @@
-"""Fine-tune a T5 model jointly on qa_pair, QA, and Distractor generation.
-
-Pulls the training dataset from a versioned W&B Artifact (created by
-data/build_dataset.py), trains with a single Seq2SeqTrainer loop across all
-three tasks, logs the resulting model as a W&B Artifact for lineage, and
-optionally pushes the final model to the HuggingFace Hub.
-
-Usage:
-    python src/train.py
-"""
-
+import argparse
 import subprocess
 from dataclasses import dataclass
 
@@ -27,7 +17,6 @@ from transformers import (
 from config import WANDB_PROJECT, TrainingConfig
 
 SPECIAL_TOKENS = ["<sep>", "[MASK]"]
-MODEL_ARTIFACT_NAME = "multitask-t5-model"
 
 
 @dataclass
@@ -129,17 +118,19 @@ def build_dataset(data_dir: str, tokenizer: AutoTokenizer, config: TrainingConfi
 
 
 def train(config: TrainingConfig) -> None:
-    """Run the full fine-tuning loop with W&B tracking and lineage.
+    """Run the full fine-tuning loop for one task, with W&B tracking and lineage.
 
     Args:
-        config: Training configuration.
+        config: Training configuration for the task being trained.
     """
     run = wandb.init(
-        project=WANDB_PROJECT, name=config.run_name, config=config.__dict__, job_type="train"
+        project=WANDB_PROJECT,
+        name=config.run_name,
+        config=config.__dict__,
+        job_type="train",
+        tags=[config.task],
     )
 
-    # Pulling the artifact both fetches the data and records lineage: this
-    # run will show up as "used" this exact dataset version in the W&B UI.
     dataset_artifact = run.use_artifact(config.dataset_artifact)
     dataset_dir = dataset_artifact.download()
 
@@ -155,10 +146,10 @@ def train(config: TrainingConfig) -> None:
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
         num_train_epochs=config.num_train_epochs,
-        max_grad_norm=config.max_grad_norm,
         warmup_steps=config.warmup_steps,
         optim=config.optim,
         fp16=config.fp16,
+        max_grad_norm=config.max_grad_norm,
         seed=config.seed,
         eval_strategy="epoch",
         save_strategy="epoch",
@@ -184,9 +175,10 @@ def train(config: TrainingConfig) -> None:
     tokenizer.save_pretrained(config.output_dir)
 
     model_artifact = wandb.Artifact(
-        name=MODEL_ARTIFACT_NAME,
+        name=f"{config.task}-t5-model",
         type="model",
         metadata={
+            "task": config.task,
             "base_model": config.model_name,
             "run_name": config.run_name,
             "git_commit": get_git_commit(),
@@ -203,8 +195,14 @@ def train(config: TrainingConfig) -> None:
         logger.info(f"Model pushed to https://huggingface.co/{config.hf_repo_id}")
 
     run.finish()
-    logger.info(f"Training complete. Model saved to {config.output_dir}")
+    logger.info(f"Training complete for task '{config.task}'. Model saved to {config.output_dir}")
 
 
 if __name__ == "__main__":
-    train(TrainingConfig())
+    parser = argparse.ArgumentParser(description="Fine-tune a T5 model on one task.")
+    parser.add_argument(
+        "--task", type=str, required=True, choices=["qa_pair", "distractor"], help="Which task to train."
+    )
+    args = parser.parse_args()
+
+    train(TrainingConfig(task=args.task))
