@@ -147,7 +147,7 @@ def train(config: TrainingConfig) -> None:
         learning_rate=config.learning_rate,
         num_train_epochs=config.num_train_epochs,
         warmup_steps=config.warmup_steps,
-#        optim=config.optim,
+        optim=config.optim,
         fp16=config.fp16,
         max_grad_norm=config.max_grad_norm,
         seed=config.seed,
