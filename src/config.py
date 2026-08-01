@@ -21,8 +21,8 @@ _ARTIFACT_BY_TASK = {
     "distractor": "distractor-dataset:latest",
 }
 _HF_REPO_BY_TASK = {
-    "qa_pair": "fahmiaziz/t5-qa-pair-generator",
-    "distractor": "fahmiaziz/t5-distractor-generator",
+    "qa_pair": "fahmiaziz/qa-pair-generator",
+    "distractor": "fahmiaziz/distractor-generator",
 }
 
 

@@ -40,12 +40,12 @@ login()
 !python src/train.py --task distractor --model_name t5-small --epochs 8
 
 # 3. Evaluate each model against its own test set
-!python src/evaluate.py --task qa_pair \
+!python src/eval.py --task qa_pair \
     --checkpoint ./checkpoints/qa_pair \
     --test_file ./data/processed/qa_pair/test.jsonl \
     --run_id <run_id_from_wandb>
 
-!python src/evaluate.py --task distractor \
+!python src/eval.py --task distractor \
     --checkpoint ./checkpoints/distractor \
     --test_file ./data/processed/distractor/test.jsonl \
     --run_id <run_id_from_wandb>
