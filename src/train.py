@@ -218,6 +218,10 @@ if __name__ == "__main__":
         default=None,
         help="Number of training epochs. Defaults to the value in TrainingConfig if not set.",
     )
+    parser.add_argument(
+        "--lr", type=float, default=None,
+        help="Learning rate override. Defaults to TrainingConfig value.",
+    )
     args = parser.parse_args()
 
     config = TrainingConfig(task=args.task)
@@ -225,5 +229,7 @@ if __name__ == "__main__":
         config.model_name = args.model_name
     if args.epochs is not None:
         config.num_train_epochs = args.epochs
+    if args.lr is not None:
+        config.learning_rate = args.lr
 
     train(config)
