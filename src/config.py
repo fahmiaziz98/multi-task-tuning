@@ -67,9 +67,9 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     num_train_epochs: int = 3
     warmup_steps: int = 500
-    optim: str = "adafactor"
+#    optim: str = "adafactor"
 
-    fp16: bool = False
+    fp16: bool = True
     max_grad_norm: float = 1.0
     seed: int = 42
 
