@@ -58,13 +58,13 @@ class _SingleTaskModel:
 
         with torch.no_grad():
             output_ids = self.model.generate(
-                **encoded, 
-                max_length=DEFAULT_MAX_TARGET_LENGTH, 
+                **encoded,
+                max_length=DEFAULT_MAX_TARGET_LENGTH,
                 num_beams=8,
                 num_beam_groups=4,
                 diversity_penalty=0.5,
                 repetition_penalty=1.3,
-                no_repeat_ngram_size=2, 
+                no_repeat_ngram_size=2,
             )
         return self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
@@ -104,7 +104,7 @@ class QuizGenerator:
             Tuple of (answer, question).
         """
         answer_for_input = answer if answer is not None else MASK_TOKEN
-        input_text = f"generate qa pair: answer: {answer_for_input} context: {context}"
+        input_text = f"{answer_for_input} {context}"
         raw_output = self._qa_pair_model.generate(input_text)
 
         if SEP_TOKEN not in raw_output:
@@ -124,7 +124,7 @@ class QuizGenerator:
         Returns:
             List of distractor strings (empty entries filtered out).
         """
-        input_text = f"generate distractor: {question} answer: {answer} context: {context}"
+        input_text = f"{question} {answer} {context}"
         raw_output = self._distractor_model.generate(input_text)
         return [d.strip() for d in raw_output.split(DISTRACTOR_SEP.strip()) if d.strip()]
 
