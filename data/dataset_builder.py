@@ -15,7 +15,7 @@ from schema import DISTRACTOR_SEP, MASK_TOKEN, SEP_TOKEN, TaskType, TrainingTask
 
 
 MAX_CONTEXT_CHARS = 2000
-MAX_EXAMPLES_PER_TASK = 15_000
+MAX_EXAMPLES_PER_TASK = 50_000
 MASKING_CHANCE = 0.3
 VAL_RATIO = 0.05
 TEST_RATIO = 0.05
@@ -84,7 +84,7 @@ def build_distractor_examples(race_split) -> list[TrainingTask]:
 
         context = row["article"][:MAX_CONTEXT_CHARS]
         input_text = (
-            f"generate distractor: question: {row['question']} "
+            f"generate distractor: {row['question']} "
             f"answer: {correct_answer} context: {context}"
         )
         target = DISTRACTOR_SEP.join(distractors)

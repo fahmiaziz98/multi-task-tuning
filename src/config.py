@@ -65,7 +65,7 @@ class TrainingConfig:
     gradient_accumulation_steps: int = 4
 
     learning_rate: float = 1e-4
-    num_train_epochs: int = 3
+    num_train_epochs: int = 10
     warmup_steps: int = 500
     optim: str = "adafactor"
 
