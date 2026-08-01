@@ -53,7 +53,7 @@ def build_qa_pair_examples(squad_split, seed: int) -> list[TrainingTask]:
         question = row["question"]
 
         answer_for_input = MASK_TOKEN if rng.random() < MASKING_CHANCE else answer
-        input_text = f"{answer_for_input} {context}"
+        input_text = f"generate question answer: {answer_for_input}. {context}"
         target = f"{answer} {SEP_TOKEN} {question}"
 
         examples.append(TrainingTask(TaskType.QA_PAIR, input_text, target))
@@ -83,7 +83,7 @@ def build_distractor_examples(race_split) -> list[TrainingTask]:
         distractors = [opt for i, opt in enumerate(options) if i != answer_idx]
 
         context = row["article"][:MAX_CONTEXT_CHARS]
-        input_text = f"{row['question']} {correct_answer} {context}"
+        input_text = f"generate distractors: {row['question']}. {correct_answer}. {context}"
         target = DISTRACTOR_SEP.join(distractors)
 
         examples.append(TrainingTask(TaskType.DISTRACTOR, input_text, target))

@@ -104,7 +104,7 @@ class QuizGenerator:
             Tuple of (answer, question).
         """
         answer_for_input = answer if answer is not None else MASK_TOKEN
-        input_text = f"{answer_for_input} {context}"
+        input_text = f"generate question answer: {answer_for_input}. {context}"
         raw_output = self._qa_pair_model.generate(input_text)
 
         if SEP_TOKEN not in raw_output:
@@ -124,7 +124,7 @@ class QuizGenerator:
         Returns:
             List of distractor strings (empty entries filtered out).
         """
-        input_text = f"{question} {answer} {context}"
+        input_text = f"generate distractors: {question}. {answer}. {context}"
         raw_output = self._distractor_model.generate(input_text)
         return [d.strip() for d in raw_output.split(DISTRACTOR_SEP.strip()) if d.strip()]
 
