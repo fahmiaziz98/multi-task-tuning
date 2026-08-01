@@ -53,7 +53,7 @@ def build_qa_pair_examples(squad_split, seed: int) -> list[TrainingTask]:
         question = row["question"]
 
         answer_for_input = MASK_TOKEN if rng.random() < MASKING_CHANCE else answer
-        input_text = f"generate qa pair: answer: {answer_for_input} context: {context}"
+        input_text = f"{answer_for_input} - {context}"
         target = f"{answer} {SEP_TOKEN} {question}"
 
         examples.append(TrainingTask(TaskType.QA_PAIR, input_text, target))
@@ -84,8 +84,8 @@ def build_distractor_examples(race_split) -> list[TrainingTask]:
 
         context = row["article"][:MAX_CONTEXT_CHARS]
         input_text = (
-            f"generate distractor: {row['question']} "
-            f"answer: {correct_answer} context: {context}"
+            f"{row['question']} "
+            f"{correct_answer} - {context}"
         )
         target = DISTRACTOR_SEP.join(distractors)
 
@@ -336,14 +336,14 @@ def main(output_dir: str) -> None:
     qa_pair_examples = sample_examples(qa_pair_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
 
     logger.info("Building distractor examples (RACE + synthetic short-answer)...")
-    race_distractor_examples = build_distractor_examples(race)
-    synthetic_distractor_examples = build_synthetic_short_distractor_examples(squad, RANDOM_SEED)
-    distractor_examples = race_distractor_examples + synthetic_distractor_examples
+    distractor_examples = build_distractor_examples(race)
+    # synthetic_distractor_examples = build_synthetic_short_distractor_examples(squad, RANDOM_SEED)
+    # distractor_examples = race_distractor_examples + synthetic_distractor_examples
     distractor_examples = sample_examples(distractor_examples, MAX_EXAMPLES_PER_TASK, RANDOM_SEED)
 
     logger.info(
         f"Counts -> qa_pair: {len(qa_pair_examples)}, distractor: {len(distractor_examples)} "
-        f"(race: {len(race_distractor_examples)}, synthetic: {len(synthetic_distractor_examples)})"
+        # f"(race: {len(race_distractor_examples)}, synthetic: {len(synthetic_distractor_examples)})"
     )
 
     write_splits_and_log(
@@ -359,8 +359,8 @@ def main(output_dir: str) -> None:
         {
             "source_race": "race/all",
             "source_synthetic": "squad/plain_text/1.1 (heuristic)",
-            "race_count": len(race_distractor_examples),
-            "synthetic_count": len(synthetic_distractor_examples),
+            "race_count": len(distractor_examples),
+            # "synthetic_count": len(synthetic_distractor_examples),
         },
     )
 
@@ -375,4 +375,3 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(args.output_dir)
-
