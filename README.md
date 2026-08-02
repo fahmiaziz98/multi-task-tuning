@@ -13,9 +13,7 @@ question, its answer, and plausible wrong options.
 Both models are trained and versioned independently, and chained together
 at inference time by `QuizGenerator`.
 
----
-
-## Why two separate models
+### Why two separate models
 
 Each model is trained on its own dataset, with its own hyperparameters,
 and produces its own checkpoint. This keeps the two tasks fully
@@ -23,9 +21,7 @@ decoupled training, evaluating, or upgrading one model never risks
 affecting the other, and each can be iterated on independently without
 re-running the full pipeline.
 
----
-
-## Base model
+### Base model
 
 Both models fine-tune `google/flan-t5-small` (77M params), an
 instruction-tuned T5 checkpoint. Because it's already instruction-tuned,
@@ -34,9 +30,7 @@ learning rate that's too high can disrupt its pretrained representations
 before the model has a chance to adapt to this task. Current defaults use
 `learning_rate=3e-5`, tuned specifically for this base model.
 
----
-
-## Prompt format
+### Prompt format
 
 Each model uses its own fixed instruction prefix since each model only
 ever sees one task, the prefix mainly keeps the input format consistent
@@ -80,9 +74,7 @@ Note:
   provide 3 annotated wrong options per question) — no synthetic or
   augmented examples from other sources.
 
----
-
-## Results
+### Results
 
 Latest evaluation, `google/flan-t5-small` base, `learning_rate=3e-5`.
 
@@ -181,8 +173,6 @@ use:
 !python data/load_artifact.py --artifact distractor-dataset:latest --output_dir ./data/processed/distractor
 ```
 
----
-
 ## Inference
 
 ```python
@@ -229,8 +219,6 @@ model.generate(
 )
 ```
 
----
-
 ## Repository structure
 
 ```
@@ -248,8 +236,6 @@ multi-task-tuning/
 ├── requirements.txt
 └── README.md
 ```
-
----
 
 ## Known limitations
 
