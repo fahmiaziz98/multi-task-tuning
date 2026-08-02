@@ -7,8 +7,6 @@ from schema import DISTRACTOR_SEP, MASK_TOKEN, SEP_TOKEN
 
 
 DEFAULT_MAX_TARGET_LENGTH = 64
-DEFAULT_NUM_BEAMS = 4
-
 
 @dataclass
 class Quiz:
