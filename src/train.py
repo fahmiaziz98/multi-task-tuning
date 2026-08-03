@@ -52,22 +52,6 @@ class Preprocessor:
         return model_inputs
 
 
-def get_git_commit() -> str | None:
-    """Return the current git commit hash, or None if not in a git repo.
-
-    Returns:
-        The commit hash string, or None if it cannot be determined.
-    """
-    try:
-        return (
-            subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
-            .decode()
-            .strip()
-        )
-    except Exception:
-        return None
-
-
 def load_tokenizer_and_model(model_name: str) -> tuple[AutoTokenizer, AutoModelForSeq2SeqLM]:
     """Load the tokenizer and model, adding custom special tokens.
 
