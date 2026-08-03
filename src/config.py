@@ -1,16 +1,3 @@
-"""Central configuration for training the qa_pair and distractor models.
-
-Each task now trains its own model, so TrainingConfig is parameterized by
-task rather than duplicated into two files. get_config(task) returns the
-right defaults, including the artifact/repo names that differ per task.
-
-Stability note: T5 + fp16 is a known unstable combination — gradients can
-overflow mid-training (visible as grad_norm: nan). Defaults here use
-Adafactor (the optimizer used in the original T5 paper, more numerically
-stable for this architecture) and fp16 disabled. Re-enable fp16 only after
-confirming training is stable without it.
-"""
-
 import uuid
 from dataclasses import dataclass, field
 
